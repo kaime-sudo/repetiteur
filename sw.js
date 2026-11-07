@@ -1,6 +1,6 @@
 // Cache propre à cette app. À changer à chaque mise à jour (v1, v2…).
 const PREFIX = 'repetiteur-';
-const CACHE = `${PREFIX}v1`;
+const CACHE = `${PREFIX}v2`;
 const ASSETS = ['./', 'index.html', 'manifest.webmanifest', 'icons/icon-192.png', 'icons/icon-512.png', 'icons/icon-maskable-512.png', 'icons/apple-touch-icon.png'];
 
 self.addEventListener('install', (e) => { e.waitUntil(caches.open(CACHE).then((c) => c.addAll(ASSETS))); });
@@ -21,5 +21,14 @@ self.addEventListener('fetch', (e) => {
     const res = await fetch(target); // Le cache se répare seul si le navigateur l'a vidé.
     if (res.ok) c.put(target, res.clone());
     return res;
+  }));
+});
+
+// Toucher la notification de fin ramène sur l'application.
+self.addEventListener('notificationclick', (e) => {
+  e.notification.close();
+  e.waitUntil(self.clients.matchAll({ type: 'window', includeUncontrolled: true }).then((list) => {
+    const c = list.find((x) => x.url.startsWith(self.registration.scope));
+    return c ? c.focus() : self.clients.openWindow(new URL('./#minuteur', self.registration.scope).href);
   }));
 });
