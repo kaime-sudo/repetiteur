@@ -1103,7 +1103,8 @@ function assessmentsHtml(id, all) {
   return `<div><h3 class="font-semibold mb-1">Évaluations (${all.length})</h3>
     ${groups.map((g) => `<details class="border-b border-line"><summary class="min-h-[44px] flex items-center justify-between gap-2 cursor-pointer"><span class="font-semibold">${esc(g.name)}</span><span class="text-sm text-muted">${g.list.length} note(s)</span></summary>
       ${g.list.map((x) => `<button type="button" class="w-full text-left py-2 border-t border-line" data-act="assessment-open" data-id="${esc(x.id)}"><span class="text-sm text-muted block">${esc(dayShort(x.date))}, ${esc(x.type)}</span><b class="num">${esc(nf1(x.score))}/${esc(nf1(x.maxScore))}</b>${x.topic ? ` ${esc(x.topic)}` : ''}${x.comment ? `<span class="text-sm text-muted block">${esc(x.comment)}</span>` : ''}</button>`).join('')}</details>`).join('') || '<p class="text-muted">Aucune évaluation.</p>'}
-    <button type="button" class="btn w-full mt-2" data-act="assessment-new" data-id="${esc(id)}">${icon('plus')}Nouvelle évaluation</button></div>`;
+    <button type="button" class="btn w-full mt-2" data-act="assessment-new" data-id="${esc(id)}">${icon('plus')}Nouvelle évaluation</button>
+    ${all.length ? `<button type="button" class="btn w-full mt-2" data-act="progress-report" data-id="${esc(id)}">Rapport PDF pour les parents</button>` : ''}</div>`;
 }
 
 /* Progression par matière : moyenne ramenée sur 20, tendance et mini-courbe. */
@@ -1499,10 +1500,13 @@ async function shareReceiptPdf(p) {
   if (!window.jspdf) { toast('Le module PDF ne s\'est pas chargé. Recharge l\'application.'); return; }
   let blob;
   try { blob = receiptPdf(p); } catch (e) { toast('Impossible de créer le PDF.'); return; }
-  const name = `Recu-${receiptNo(p)}.pdf`;
+  await sharePdf(blob, `Recu-${receiptNo(p)}.pdf`, `Reçu ${receiptNo(p)}`);
+}
+/* Partage un PDF : feuille de partage du téléphone si possible, sinon téléchargement. */
+async function sharePdf(blob, name, title) {
   const file = new File([blob], name, { type: 'application/pdf' });
   try {
-    if (navigator.canShare?.({ files: [file] })) { await navigator.share({ files: [file], title: `Reçu ${receiptNo(p)}` }); return; }
+    if (navigator.canShare?.({ files: [file] })) { await navigator.share({ files: [file], title }); return; }
   } catch (e) { if (e && e.name === 'AbortError') return; }
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
@@ -1510,6 +1514,152 @@ async function shareReceiptPdf(p) {
   document.body.append(a); a.click(); a.remove();
   setTimeout(() => URL.revokeObjectURL(url), 60000);
   toast('PDF enregistré dans tes téléchargements.');
+}
+
+/* Rapport de suivi individuel (PDF A4) : moyenne des évaluations en répétition, par matière, sur la période choisie. */
+function reportPdf(s, from, to, withComments) {
+  const { jsPDF } = window.jspdf;
+  const list = state.assessments.filter((a) => a.studentId === s.id && a.date >= from && a.date <= to);
+  const st = subjectStats(list);
+  const overall = list.reduce((n, a) => n + a.score / a.maxScore, 0) / list.length * 20;
+  const doc = new jsPDF({ unit: 'mm', format: 'a4' });
+  const W = 210, M = 16;
+  const dShort = (x) => fmtDate(x, { day: '2-digit', month: '2-digit', year: 'numeric' });
+  const dLong = (x) => fmtDate(x, { day: 'numeric', month: 'long', year: 'numeric' });
+  let y = 0;
+  const ensure = (h) => { if (y + h > 280) { doc.addPage(); y = 20; } };
+  doc.setFillColor(31, 61, 54); doc.rect(0, 0, W, 40, 'F');
+  doc.setTextColor(255, 255, 255); doc.setFont('helvetica', 'bold'); doc.setFontSize(22);
+  doc.text('RAPPORT DE SUIVI', M, 18);
+  doc.setFont('helvetica', 'normal'); doc.setFontSize(11);
+  doc.text(pdfSafe(`Du ${dLong(from)} au ${dLong(to)}`), M, 28);
+  if (state.teacher) doc.text(pdfSafe(state.teacher), W - M, 28, { align: 'right' });
+  y = 54;
+  doc.setTextColor(110, 110, 110); doc.setFontSize(10); doc.text('Élève', M, y);
+  doc.setTextColor(30, 30, 30); doc.setFont('helvetica', 'bold'); doc.setFontSize(15);
+  doc.text(pdfSafe(`${s.name}${s.classe ? `  (${s.classe})` : ''}`), M, y + 7);
+  y += 20;
+  doc.setDrawColor(31, 61, 54); doc.setLineWidth(0.6); doc.roundedRect(M, y, W - 2 * M, 22, 2, 2);
+  doc.setFont('helvetica', 'normal'); doc.setFontSize(10); doc.setTextColor(110, 110, 110);
+  doc.text('Moyenne des évaluations en répétition', M + 5, y + 8);
+  doc.setFont('helvetica', 'bold'); doc.setFontSize(18); doc.setTextColor(31, 61, 54);
+  doc.text(pdfSafe(`${nf1(overall)} / 20`), M + 5, y + 17);
+  doc.setFont('helvetica', 'normal'); doc.setFontSize(10); doc.setTextColor(60, 60, 60);
+  doc.text(pdfSafe(`${list.length} évaluation${list.length > 1 ? 's' : ''}`), W - M - 5, y + 17, { align: 'right' });
+  y += 34;
+  // tableau par matière
+  const cols = { n: M + 66, avg: M + 86, tr: M + 108, cv: W - M - 28 };
+  const head = () => {
+    doc.setFillColor(235, 240, 237); doc.rect(M, y, W - 2 * M, 8, 'F');
+    doc.setFont('helvetica', 'bold'); doc.setFontSize(9); doc.setTextColor(60, 60, 60);
+    doc.text('Matière', M + 2, y + 5.5); doc.text('Éval.', cols.n, y + 5.5); doc.text('Moyenne /20', cols.avg, y + 5.5);
+    doc.text('Évolution', cols.tr, y + 5.5); doc.text('Courbe', cols.cv, y + 5.5);
+    y += 8;
+  };
+  head();
+  st.forEach((x) => {
+    ensure(11);
+    doc.setFont('helvetica', 'bold'); doc.setFontSize(10); doc.setTextColor(30, 30, 30);
+    doc.text(pdfSafe(doc.splitTextToSize(x.name, 60)[0]), M + 2, y + 6.5);
+    doc.setFont('helvetica', 'normal');
+    doc.text(String(x.n), cols.n, y + 6.5);
+    doc.setFont('helvetica', 'bold'); doc.text(pdfSafe(nf1(x.avg)), cols.avg, y + 6.5);
+    doc.setFont('helvetica', 'normal'); doc.setFontSize(9);
+    const tr = x.trend === null ? '-' : x.trend >= 0.5 ? `En hausse (+${nf1(x.trend)})` : x.trend <= -0.5 ? `En baisse (${nf1(x.trend)})` : 'Stable';
+    doc.text(pdfSafe(tr), cols.tr, y + 6.5);
+    if (x.pcts.length > 1) {
+      doc.setDrawColor(31, 61, 54); doc.setLineWidth(0.5);
+      const step = 28 / (x.pcts.length - 1);
+      const pt = (p, k) => [cols.cv + k * step, y + 8 - Math.max(0, Math.min(1, p)) * 6.5];
+      for (let k = 1; k < x.pcts.length; k++) { const [x1, y1] = pt(x.pcts[k - 1], k - 1); const [x2, y2] = pt(x.pcts[k], k); doc.line(x1, y1, x2, y2); }
+    }
+    doc.setDrawColor(220, 226, 222); doc.setLineWidth(0.2); doc.line(M, y + 10, W - M, y + 10);
+    y += 10;
+  });
+  y += 4;
+  doc.setFont('helvetica', 'normal'); doc.setFontSize(8); doc.setTextColor(120, 120, 120);
+  doc.text(doc.splitTextToSize(pdfSafe("Évolution : moyenne des 3 dernières notes comparée aux précédentes (au moins 4 notes sur la période). « - » : pas assez de notes."), W - 2 * M), M, y + 3);
+  y += 14;
+  // détail
+  ensure(20);
+  doc.setFont('helvetica', 'bold'); doc.setFontSize(13); doc.setTextColor(31, 61, 54); doc.text('Détail des évaluations', M, y); y += 8;
+  const by = new Map();
+  [...list].sort((a, b) => a.date.localeCompare(b.date) || (a.createdAt || 0) - (b.createdAt || 0)).forEach((a) => {
+    const k = subjectKey(a.subject) || '?';
+    if (!by.has(k)) by.set(k, { name: String(a.subject || '').trim() || 'Sans matière', items: [] });
+    by.get(k).items.push(a);
+  });
+  [...by.values()].sort((a, b) => a.name.localeCompare(b.name, 'fr')).forEach((g) => {
+    ensure(18);
+    doc.setFont('helvetica', 'bold'); doc.setFontSize(11); doc.setTextColor(30, 30, 30);
+    doc.text(pdfSafe(g.name), M, y); y += 2;
+    doc.setDrawColor(31, 61, 54); doc.setLineWidth(0.5); doc.line(M, y, W - M, y); y += 5;
+    g.items.forEach((a) => {
+      const label = pdfSafe(`${dShort(a.date)}  ${a.type}${a.topic ? `  -  ${a.topic}` : ''}`);
+      const lines = doc.splitTextToSize(label, W - 2 * M - 30);
+      const comment = withComments && a.comment ? doc.splitTextToSize(pdfSafe(a.comment), W - 2 * M - 10) : [];
+      ensure(lines.length * 4.6 + comment.length * 4 + 3);
+      doc.setFont('helvetica', 'normal'); doc.setFontSize(10); doc.setTextColor(30, 30, 30);
+      doc.text(lines, M, y);
+      doc.setFont('helvetica', 'bold'); doc.text(pdfSafe(`${nf1(a.score)} / ${nf1(a.maxScore)}`), W - M, y, { align: 'right' });
+      y += lines.length * 4.6;
+      if (comment.length) {
+        doc.setFont('helvetica', 'italic'); doc.setFontSize(9); doc.setTextColor(90, 90, 90);
+        doc.text(comment, M + 6, y); y += comment.length * 4;
+      }
+      y += 2.5;
+    });
+    y += 4;
+  });
+  const pages = doc.getNumberOfPages();
+  for (let p = 1; p <= pages; p++) {
+    doc.setPage(p); doc.setFont('helvetica', 'normal'); doc.setFontSize(8); doc.setTextColor(130, 130, 130);
+    doc.text(doc.splitTextToSize(pdfSafe("Moyenne simple des notes ramenées sur 20, sans coefficient. Ce document ne remplace pas le bulletin de l'établissement."), W - 2 * M - 20), M, 289);
+    doc.text(`Page ${p}/${pages}`, W - M, 289, { align: 'right' });
+  }
+  return doc.output('blob');
+}
+function openReportForm(id) {
+  const s = student(id);
+  if (!s) return;
+  const mine = state.assessments.filter((a) => a.studentId === id);
+  if (!mine.length) { toast("Aucune évaluation à envoyer pour cet élève."); return; }
+  const m = monthOf(today());
+  const [yy, mo] = m.split('-').map(Number);
+  const presets = {
+    month: [`${m}-01`, today()],
+    last: [isoDate(new Date(yy, mo - 2, 1)), isoDate(new Date(yy, mo - 1, 0))],
+    all: [mine.map((a) => a.date).sort()[0], today()],
+  };
+  openSheet(`Rapport de ${s.name}`, `
+    <div class="flex flex-wrap gap-2"><button type="button" class="btn" data-preset="month">Ce mois</button><button type="button" class="btn" data-preset="last">Mois dernier</button><button type="button" class="btn" data-preset="all">Tout</button></div>
+    <div class="grid grid-cols-2 gap-3">
+      <label><span class="field-label">Du</span><input class="input" type="date" name="from" max="${today()}" value="${presets.month[0]}"></label>
+      <label><span class="field-label">Au</span><input class="input" type="date" name="to" max="${today()}" value="${presets.month[1]}"></label>
+    </div>
+    <label class="flex items-center gap-3 min-h-[44px]"><input type="checkbox" name="comments" style="width:22px;height:22px"><span>Inclure les commentaires pédagogiques</span></label>
+    <p class="text-sm text-muted">Les commentaires sont tes observations personnelles : relis-les avant de cocher.</p>
+    <p class="font-semibold" id="rp-count" aria-live="polite"></p>
+    <p class="err" data-err="x"></p>`,
+  '<button type="submit" class="btn btn-primary">Créer le PDF</button>', (d, form) => {
+    const f = form.elements;
+    const inRange = () => (isDate(f.from.value) && isDate(f.to.value) ? mine.filter((a) => a.date >= f.from.value && a.date <= f.to.value) : []);
+    const count = () => { const n = inRange().length; $('#rp-count', d).textContent = `${n} évaluation${n > 1 ? 's' : ''} sur cette période.`; };
+    count();
+    form.addEventListener('input', count);
+    $$('[data-preset]', d).forEach((b) => { b.onclick = () => { [f.from.value, f.to.value] = presets[b.dataset.preset]; count(); }; });
+    form.addEventListener('submit', async () => {
+      const err = $('[data-err=x]', d);
+      err.textContent = '';
+      if (!isDate(f.from.value) || !isDate(f.to.value) || f.from.value > f.to.value) { err.textContent = 'Choisis une période valide.'; return; }
+      if (!inRange().length) { err.textContent = "Aucune évaluation sur cette période."; return; }
+      if (!window.jspdf) { err.textContent = "Le module PDF ne s'est pas chargé. Recharge l'application."; return; }
+      let blob;
+      try { blob = reportPdf(s, f.from.value, f.to.value, f.comments.checked); } catch (e) { err.textContent = 'Impossible de créer le PDF.'; return; }
+      const slug = s.name.normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/[^a-zA-Z0-9]+/g, '-').replace(/^-|-$/g, '');
+      await sharePdf(blob, `Rapport-${slug}-${f.from.value}_${f.to.value}.pdf`, `Rapport de suivi, ${s.name}`);
+    });
+  });
 }
 function openReceipt(p) {
   if (!p || !student(p.studentId)) return;
@@ -2314,6 +2464,7 @@ const ACTIONS = {
     openPayForm(null, d.id, d.month);
   },
   receipt: (d) => openReceipt(state.payments.find((p) => p.id === d.id)),
+  'progress-report': (d) => openReportForm(d.id),
   'assessment-open': (d) => { const x = state.assessments.find((y) => y.id === d.id); if (x) openAssessmentForm(x.studentId, x); },
   'hide-toggle': () => { state.hide = !state.hide; try { localStorage.setItem('repetiteur-hide', state.hide ? '1' : '0'); } catch { /* facultatif */ } syncEye(); render(); },
   'lock-set': async () => { if (await setupPin()) { toast('Verrouillage activé.'); render(); } },
