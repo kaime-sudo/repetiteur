@@ -992,9 +992,20 @@ function openStudentForm(existing) {
     <fieldset class="grid gap-2"><legend class="field-label">Horaires fixes (jour, heure, durée en min)</legend>
       <div id="slots" class="grid gap-2">${(existing ? openSlots(s) : [{ weekday: 1, time: '17:00', duration: 60 }]).map(slotRow).join('')}</div>
       <button type="button" class="btn" id="add-slot">${icon('plus')}Ajouter un horaire</button><p class="err" data-err="slots"></p></fieldset>
+    <fieldset class="grid gap-2" id="school"><legend class="field-label">Emploi du temps à l'école (facultatif)</legend>
+      ${(() => {
+    const stored = new Set(Object.values(s.school || {}).flat().filter((x) => typeof x === 'string'));
+    const list = [...subjectChoices(), ...[...stored].filter((x) => !subjectChoices().some((y) => subjectKey(y) === subjectKey(x)))];
+    return [1, 2, 3, 4, 5, 6].map((wd) => `<details class="border border-line rounded-lg" data-school="${wd}"><summary class="min-h-[44px] px-3 flex items-center justify-between gap-2 cursor-pointer"><span class="font-semibold">${DAYS[wd]}</span><span class="text-sm text-muted truncate" data-sum></span></summary>
+        <div class="grid gap-1 px-3 pb-3">${list.map((x) => `<label class="flex items-center gap-3 min-h-[40px]"><input type="checkbox" style="width:20px;height:20px" value="${esc(x)}" ${schoolOfDay(s, wd).includes(x) ? 'checked' : ''}><span>${esc(x)}</span></label>`).join('')}</div></details>`).join('');
+  })()}
+      <p class="text-sm text-muted">Sert à t'indiquer quelles matières préparer pour le jour d'école suivant chaque séance.</p></fieldset>
     ${existing ? `<p class="text-sm text-muted">Un nouveau tarif s'applique à partir de ${esc(monthLong(monthOf(today())))}. Un horaire modifié s'applique à partir d'aujourd'hui.</p>` : ''}`,
   `<button type="submit" class="btn btn-primary">Enregistrer l'élève</button>`, (d, form) => {
     bindAmount(form.elements.fee);
+    const sums = () => $$('[data-school]', d).forEach((det) => { $('[data-sum]', det).textContent = $$('input:checked', det).map((i) => i.value).join(', ') || 'Aucune'; });
+    sums();
+    $('#school', d).addEventListener('change', sums);
     $('#add-slot', d).onclick = () => $('#slots', d).insertAdjacentHTML('beforeend', slotRow());
     $('#slots', d).addEventListener('click', (e) => { const b = e.target.closest('[data-rm-slot]'); if (b) b.closest('[data-slot]').remove(); });
     if (!existing) form.elements.name.focus();
@@ -1021,6 +1032,7 @@ function openStudentForm(existing) {
         dueDay, startMonth: f.startMonth.value, active: s.active ?? true,
         feeHistory: existing ? setFee(s, feeV, month) : [{ from: f.startMonth.value, amount: feeV }],
         schedule: mergeSchedule(s.schedule || [], slots, today()),
+        school: Object.fromEntries($$('[data-school]', d).map((det) => [det.dataset.school, $$('input:checked', det).map((i) => i.value)]).filter(([, v]) => v.length)),
       };
       await DB.put('students', rec);
       closeSheet();
@@ -1166,6 +1178,7 @@ function openStudent(id) {
       <p class="font-bold num ${net < 0 ? 'text-late' : 'text-paid'}">Net ${esc(mm(net))}</p>
       ${costs ? '' : '<p class="text-sm text-muted">Lie le transport de cet élève dans Finances, Dépenses, pour voir ce qu\'il te rapporte vraiment.</p>'}</div>
     <div><h3 class="font-semibold mb-1">Horaires fixes</h3>${openSlots(s).map((x) => `<p>${esc(slotText(x))}</p>`).join('') || '<p class="text-muted">Aucun</p>'}</div>
+    <div><h3 class="font-semibold mb-1">Emploi du temps à l'école</h3>${[1, 2, 3, 4, 5, 6].filter((wd) => schoolOfDay(s, wd).length).map((wd) => `<p><b>${DAYS[wd]}</b> : ${esc(schoolOfDay(s, wd).join(', '))}</p>`).join('') || '<p class="text-muted">Non renseigné. Ajoute-le en modifiant l\'élève.</p>'}</div>
     <div><h3 class="font-semibold mb-1">À rattraper (${makeups.length})</h3>${makeups.map((x) => `<div class="flex justify-between items-center gap-2 py-1"><span>${esc(dayShort(x.date))}</span><button type="button" class="btn" data-act="makeup-plan" data-id="${esc(x.id)}">Planifier</button></div>`).join('') || '<p class="text-muted">Rien à rattraper.</p>'}</div>
     <div><h3 class="font-semibold mb-1">Cahier de texte</h3>${notes.map((x) => `<p class="py-1 border-b border-line last:border-0"><span class="text-sm text-muted block">${esc(dayShort(x.date))}</span>${esc(x.note)}</p>`).join('') || '<p class="text-muted">Aucune note pour le moment.</p>'}</div>
     ${progressionHtml(allEvals)}${assessmentsHtml(id, allEvals)}
@@ -1220,6 +1233,26 @@ const findSession = (id) => {
   const [sid, date] = id.split('|');
   return sessionsOn(date, state.students, []).find((s) => s.id === id) || null;
 };
+/* Emploi du temps scolaire de l'élève (facultatif) : matières par jour d'école, pour savoir quoi travailler selon la séance. */
+const weekdayOf = (s) => parseDate(s).getDay();
+const schoolOfDay = (st, wd) => { const v = st?.school?.[wd]; return Array.isArray(v) ? v.filter((x) => typeof x === 'string' && x) : []; };
+function nextSchoolDay(st, date) {
+  for (let i = 1; i <= 7; i++) {
+    const d = addDays(date, i);
+    const subs = schoolOfDay(st, weekdayOf(d));
+    if (subs.length) return { date: d, subs };
+  }
+  return null;
+}
+function focusHtml(st, date) {
+  if (!st) return '';
+  const same = schoolOfDay(st, weekdayOf(date));
+  const nx = nextSchoolDay(st, date);
+  if (!same.length && !nx) return '';
+  return `<div class="text-sm grid gap-0.5 border-l-2 border-line pl-2">
+    ${same.length ? `<p><span class="text-muted">Vu en classe ${date === today() ? "aujourd'hui" : 'ce jour-là'} :</span> ${esc(same.join(', '))}</p>` : ''}
+    ${nx ? `<p><b>À préparer pour ${esc(DAYS[weekdayOf(nx.date)].toLowerCase())} :</b> ${esc(nx.subs.join(', '))}</p>` : ''}</div>`;
+}
 function sessionCard(s) {
   const st = student(s.studentId);
   const done = s.status !== 'prevue';
@@ -1240,6 +1273,7 @@ function sessionCard(s) {
     ${moved ? `<p class="text-sm">Reportée au ${esc(dayShort(moved.date))} à ${esc(moved.time.replace(':', ' h '))}.</p>` : ''}
     ${s.waived ? '<p class="text-sm text-muted">Sans rattrapage.</p>' : ''}
     ${s.note ? `<p class="text-sm border-l-2 border-line pl-2 break-words">${esc(s.note)}</p>` : ''}
+    ${['prevue', 'effectuee'].includes(s.status) ? focusHtml(st, s.date) : ''}
     ${extra}
     <div class="flex flex-wrap gap-x-4">
       <button type="button" class="link text-sm" data-act="note" data-id="${esc(s.id)}">${s.note ? 'Modifier le résumé' : 'Ajouter un résumé'}</button>
@@ -2291,6 +2325,7 @@ function viewDashboard(root) {
                 <p class="text-sm text-muted">${esc(dayLong(next.date))} à ${esc(next.time)} · ${next.duration} min</p>
               </div>
             </div>
+            ${focusHtml(student(next.studentId), next.date)}
           </div>
           ${upcoming.length > 1 ? `
             <div class="border-t border-line pt-2 grid gap-2">
