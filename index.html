@@ -841,7 +841,7 @@ const DAYS = ['Dimanche', 'Lundi', 'Mardi', 'Mercredi', 'Jeudi', 'Vendredi', 'Sa
 const CLASSES = ['CP1', 'CP2', 'CE1', 'CE2', 'CM1', 'CM2', '6ème', '5ème', '4ème', '3ème', 'Seconde A', 'Seconde C', 'Première A', 'Première C', 'Première D', 'Terminale A', 'Terminale C', 'Terminale D'];
 const state = {
   students: [], sessions: [], payments: [], recordings: [], assessments: [], expenses: [],
-  teacher: '', lastBackup: null, billing: 'apres', sound: 'reveil', reminder: 30,
+  teacher: '', lastBackup: null, lastAudioBackup: null, billing: 'apres', sound: 'reveil', reminder: 30,
   view: 'accueil', planMode: 'jour', planDate: null, finMonth: null, finFilter: '', search: '',
   hide: false, customSubjects: [],
 };
@@ -876,6 +876,7 @@ async function load() {
   names.forEach((n, i) => { state[n] = res[i]; });
   state.teacher = (await DB.getMeta('teacher')) || '';
   state.lastBackup = (await DB.getMeta('lastBackup')) || null;
+  state.lastAudioBackup = (await DB.getMeta('lastAudioBackup')) || null;
   state.billing = (await DB.getMeta('billing')) || 'apres';
   CONFIG.billing = state.billing;
   state.sound = (await DB.getMeta('sound')) || 'reveil';
@@ -1790,6 +1791,7 @@ function restoreTimers() {
     if (t?.session && t?.exercise && t?.watch) Object.assign(Time, t);
   } catch { /* état par défaut */ }
 }
+const paused = (t) => !t.running && t.left > 0 && t.left < t.total;
 const hhmm = (ms) => new Intl.DateTimeFormat('fr-FR', { hour: '2-digit', minute: '2-digit' }).format(new Date(ms)).replace(':', ' h ');
 const leftOf = (t) => (t.running ? t.endAt - Date.now() : t.left);
 const watchOf = () => Time.watch.elapsed + (Time.watch.running ? Date.now() - Time.watch.startedAt : 0);
@@ -1954,7 +1956,7 @@ function renderTimers() {
     const txt = fmtTime(left);
     if (dg.textContent !== txt) dg.textContent = txt;
     const endEl = $(`#${k}-end`);
-    if (endEl) endEl.textContent = t.running ? `Fin prévue à ${hhmm(t.endAt)}` : '';
+    if (endEl) endEl.textContent = t.running ? `Fin prévue à ${hhmm(t.endAt)}` : paused(t) ? `En pause. Si tu reprends maintenant, fin à ${hhmm(Date.now() + t.left)}` : '';
     $(`#${k}-meter`).style.width = `${Math.max(0, Math.min(100, (left / t.total) * 100))}%`;
     const go = $(`#${k}-go`);
     const lbl = t.running ? 'Pause' : left > 0 && left < t.total ? 'Reprendre' : 'Démarrer';
@@ -1969,7 +1971,12 @@ function renderTimers() {
     if (go.textContent !== lbl) go.textContent = lbl;
   }
   const he = $('#home-end');
-  if (he) { he.hidden = !Time.session.running; if (Time.session.running) he.textContent = `Séance en cours, fin prévue à ${hhmm(Time.session.endAt)}`; }
+  if (he) {
+    const s = Time.session;
+    he.hidden = !(s.running || paused(s));
+    if (s.running) he.textContent = `Séance en cours, fin prévue à ${hhmm(s.endAt)}`;
+    else if (paused(s)) he.textContent = `Séance en pause, fin à ${hhmm(Date.now() + s.left)} si tu reprends maintenant`;
+  }
   const mini = $('#mini');
   const run = Time.session.running ? Time.session : Time.exercise.running ? Time.exercise : null;
   mini.hidden = !run || state.view === 'minuteur';
@@ -2146,7 +2153,13 @@ function viewDashboard(root) {
   const monthIncome = state.payments.filter((p) => monthOf(p.date) === m).reduce((n, p) => n + p.amount, 0);
   const monthHours = state.sessions.filter((s) => monthOf(s.date) === m && s.status === 'effectuee').reduce((n, s) => n + (Number(s.duration) || 0), 0);
   const balance = monthBalance(state.students, state.payments, m, t);
-  const needBackup = state.students.length > 0 && (!state.lastBackup || Date.now() - state.lastBackup > 14 * 864e5);
+  const DAY = 864e5;
+  let snoozed = false;
+  try { snoozed = Date.now() < Number(localStorage.getItem('repetiteur-snooze') || 0); } catch { /* facultatif */ }
+  const needBackup = !snoozed && state.students.length > 0 && (!state.lastBackup || Date.now() - state.lastBackup > 7 * DAY);
+  const newestRec = Math.max(0, ...state.recordings.map((r) => r.createdAt || 0));
+  const needAudio = !snoozed && state.recordings.length > 0 && newestRec > (state.lastAudioBackup || 0) && (!state.lastAudioBackup || Date.now() - state.lastAudioBackup > 7 * DAY);
+  const agoTxt = (ts) => (ts ? `Dernière sauvegarde : il y a ${Math.max(1, Math.floor((Date.now() - ts) / DAY))} jour(s).` : "Aucune sauvegarde n'a encore été créée.");
   const income = incomeByMonth(state.payments, m, 6);
   const maxIncome = Math.max(1, ...income.map((x) => x.amount));
   const upcoming = [];
@@ -2235,11 +2248,12 @@ function viewDashboard(root) {
             <div><p class="font-semibold">${makeups.length} séance(s) à rattraper</p><p class="text-sm text-muted">Séances annulées sans nouvelle date</p></div>
             <span class="link">Voir →</span>
           </a>` : ''}
-        ${needBackup ? `
+        ${needBackup || needAudio ? `
           <article class="card grid gap-2">
             <p class="font-semibold">Pense à sauvegarder tes données</p>
-            <p class="text-sm text-muted">${state.lastBackup ? 'La dernière sauvegarde date de plus de 14 jours.' : "Aucune sauvegarde n'a encore été créée."} Les données sont conservées sur cet appareil.</p>
-            <button type="button" class="btn btn-primary" data-act="export">Exporter les données</button>
+            ${needBackup ? `<p class="text-sm text-muted">Données : ${esc(agoTxt(state.lastBackup))}</p><button type="button" class="btn btn-primary" data-act="export">Sauvegarder les données</button>` : ''}
+            ${needAudio ? `<p class="text-sm text-muted">Explications audio : ${esc(agoTxt(state.lastAudioBackup))}</p><button type="button" class="btn ${needBackup ? '' : 'btn-primary'}" data-act="audio-export">Sauvegarder les explications</button>` : ''}
+            <button type="button" class="btn" data-act="backup-snooze">Plus tard (rappel demain)</button>
           </article>` : ''}
       </section>
 
@@ -2309,7 +2323,7 @@ function viewSettings(root) {
       <p>${state.lastBackup ? `Dernière sauvegarde le ${esc(new Intl.DateTimeFormat('fr-FR', { dateStyle: 'long' }).format(state.lastBackup))}.` : 'Aucune sauvegarde pour le moment.'}</p>
       <button type="button" class="btn btn-primary" data-act="export">Exporter les données</button>
       <label class="btn" for="import">Importer les données</label><input class="sr-only" type="file" id="import" accept=".json,application/json">
-      <p class="text-sm text-muted">Le fichier n'est pas chiffré et contient les noms des élèves et les numéros des parents. Garde-le hors du téléphone, jamais dans un dépôt public.</p></section>
+      <p class="text-sm text-muted">Sans mot de passe, le fichier est lisible par n'importe qui : il contient les noms des élèves et les numéros des parents. Protège-le par un mot de passe à la création, garde-le hors du téléphone, jamais dans un dépôt public.</p></section>
     <section class="card grid gap-3"><h2 class="text-lg">Ton nom</h2>
       <label><span class="field-label">Signature des messages WhatsApp</span><input class="input" id="teacher" autocomplete="name" value="${esc(state.teacher)}"></label></section>
     <section class="card grid gap-3"><h2 class="text-lg">Affichage</h2>
@@ -2337,13 +2351,16 @@ function viewSettings(root) {
       <p class="text-sm text-muted">iPhone : ouvre le fichier, puis « Tout ajouter ». Android : ouvre-le avec l'application Agenda du téléphone ; l'app Google Agenda ne l'importe pas, il faut passer par calendar.google.com sur ordinateur. Importe-le dans un agenda réservé aux cours : après un changement d'horaire, vide cet agenda puis réimporte, sinon les cours seront en double.</p></section>
     <section class="card grid gap-2"><h2 class="text-lg">Espace utilisé</h2>
       <p>${state.recordings.length} explication(s) enregistrée(s), ${esc(fmtSize(state.recordings.reduce((n, r) => n + r.size, 0)))}.</p>
-      <p class="text-sm text-muted">Les enregistrements ne sont pas dans la sauvegarde. Pour en garder une copie, utilise « Partager » sur la fiche de l'élève.</p>
+      <p class="text-sm text-muted">Les enregistrements ne sont pas dans la sauvegarde normale : ils ont leur propre fichier. ${state.lastAudioBackup ? `Dernière sauvegarde le ${esc(new Intl.DateTimeFormat('fr-FR', { dateStyle: 'long' }).format(state.lastAudioBackup))}.` : "Aucune sauvegarde des explications pour le moment."}</p>
+      <button type="button" class="btn" data-act="audio-export">Sauvegarder les explications</button>
+      <label class="btn" for="import-audio">Restaurer les explications</label><input class="sr-only" type="file" id="import-audio" accept=".json,application/json">
       <p class="text-sm text-muted" id="quota"></p></section>
     <section class="card grid gap-3"><h2 class="text-lg">Effacement</h2><button type="button" class="btn btn-danger" data-act="erase">Effacer toutes les données</button></section>
     <p class="text-sm text-muted">Répétiteur, version 1.4</p></div>`;
   $$('[name=theme]', root).forEach((r) => r.addEventListener('change', (e) => setTheme(e.target.value)));
   $('#teacher', root).addEventListener('change', async (e) => { await DB.setMeta('teacher', e.target.value.trim()); state.teacher = e.target.value.trim(); toast('Nom enregistré.'); });
   $('#import', root).addEventListener('change', importFile);
+  $('#import-audio', root).addEventListener('change', importAudios);
   $$('[name=billing]', root).forEach((r) => r.addEventListener('change', async (e) => {
     await DB.setMeta('billing', e.target.value);
     state.finMonth = null;
@@ -2357,18 +2374,108 @@ function viewSettings(root) {
     if (el) el.textContent = ok ? 'Stockage protégé contre le nettoyage automatique du navigateur.' : "Stockage non garanti : le navigateur peut effacer les données si le téléphone manque d'espace. Exporte régulièrement.";
   });
 }
-async function exportData() {
+/* Protection par mot de passe : AES-GCM 256 bits, clé dérivée du mot de passe par PBKDF2 (250 000 itérations). Rien n'est stocké : mot de passe oublié = fichier illisible. */
+const PW_ITER = 250000;
+const smallB64 = (u8) => btoa(String.fromCharCode(...u8));
+const fromSmallB64 = (s) => Uint8Array.from(atob(s), (c) => c.charCodeAt(0));
+async function pwKey(pw, salt, iter) {
+  const km = await crypto.subtle.importKey('raw', new TextEncoder().encode(pw), 'PBKDF2', false, ['deriveKey']);
+  return crypto.subtle.deriveKey({ name: 'PBKDF2', salt, iterations: iter, hash: 'SHA-256' }, km, { name: 'AES-GCM', length: 256 }, false, ['encrypt', 'decrypt']);
+}
+async function encryptBlob(blob, pw, kind) {
+  const salt = crypto.getRandomValues(new Uint8Array(16));
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const ct = await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, await pwKey(pw, salt, PW_ITER), await blob.arrayBuffer());
+  const env = { app: 'repetiteur-chiffre', version: 1, kind, kdf: 'PBKDF2-SHA256', iter: PW_ITER, salt: smallB64(salt), iv: smallB64(iv), data: await buf2b64(ct) };
+  return new Blob([JSON.stringify(env)], { type: 'application/json' });
+}
+async function decryptEnvelope(env, pw) {
+  const iter = Number(env.iter);
+  if (!Number.isInteger(iter) || iter < 100000 || iter > 2000000) throw new Error('iter');
+  const pt = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: fromSmallB64(env.iv) }, await pwKey(pw, fromSmallB64(env.salt), iter), b642buf(env.data));
+  return new TextDecoder().decode(pt);
+}
+/* Lit un fichier de sauvegarde. S'il est protégé, demande le mot de passe dans la feuille (qui reste ouverte pour l'étape suivante). Renvoie le texte, ou null si annulé. */
+async function readBackupText(file, kind) {
+  const text = await file.text();
+  let env;
+  try { env = JSON.parse(text); } catch { return text; }
+  if (env?.app !== 'repetiteur-chiffre') return text;
+  if (env.kind !== kind) throw new Error('kind');
+  if (!crypto?.subtle) throw new Error('subtle');
+  return new Promise((resolve) => {
+    openSheet('Fichier protégé', `<p>Ce fichier est protégé par un mot de passe.</p>
+      <label><span class="field-label">Mot de passe</span><input class="input" type="password" name="pw" autocomplete="off"></label>
+      <p class="err" data-err="x"></p>`,
+    '<button type="button" class="btn" data-close>Annuler</button><button type="submit" class="btn btn-primary">Ouvrir</button>', (d, form) => {
+      form.elements.pw.focus();
+      d.addEventListener('close', () => resolve(null), { once: true });
+      form.addEventListener('submit', async () => {
+        const err = $('[data-err=x]', d);
+        err.textContent = '';
+        if (!form.elements.pw.value) { err.textContent = 'Saisis le mot de passe.'; return; }
+        try { resolve(await decryptEnvelope(env, form.elements.pw.value)); } catch { err.textContent = 'Mot de passe incorrect, ou fichier abîmé.'; }
+      });
+    });
+  });
+}
+/* Champs « protéger par mot de passe » communs aux deux exports. */
+const encFields = () => {
+  let on = false;
+  try { on = localStorage.getItem('repetiteur-enc') === '1'; } catch { /* facultatif */ }
+  return `<label class="flex items-center gap-3 min-h-[44px]"><input type="checkbox" name="enc" style="width:22px;height:22px" ${on ? 'checked' : ''}><span class="font-semibold">Protéger par un mot de passe</span></label>
+    <div id="enc-box" class="grid gap-3" ${on ? '' : 'hidden'}>
+      <label><span class="field-label">Mot de passe (6 caractères minimum)</span><input class="input" type="password" name="pw1" autocomplete="new-password"></label>
+      <label><span class="field-label">Confirme le mot de passe</span><input class="input" type="password" name="pw2" autocomplete="new-password"></label>
+      <p class="text-sm text-muted">Si tu oublies ce mot de passe, la sauvegarde est <b>définitivement illisible</b>. Personne ne peut le retrouver, moi non plus. Note-le ailleurs.</p>
+    </div>`;
+};
+const bindEnc = (d, form) => { form.elements.enc.addEventListener('change', () => { $('#enc-box', d).hidden = !form.elements.enc.checked; }); };
+/* Renvoie le mot de passe, ou null si la protection n'est pas demandée. Lève une erreur lisible si les champs sont invalides. */
+function readEnc(form) {
+  const on = form.elements.enc.checked;
+  try { localStorage.setItem('repetiteur-enc', on ? '1' : '0'); } catch { /* facultatif */ }
+  if (!on) return null;
+  if (!crypto?.subtle) throw new Error("La protection par mot de passe n'est pas disponible sur ce navigateur.");
+  const a = form.elements.pw1.value;
+  if (a.length < 6) throw new Error('Choisis un mot de passe de 6 caractères au moins.');
+  if (a !== form.elements.pw2.value) throw new Error('Les deux mots de passe sont différents.');
+  return a;
+}
+function openDataExport() {
+  openSheet('Sauvegarder les données', `
+    <p>${state.students.length} élève(s), ${state.payments.length} versement(s), ${state.assessments.length} évaluation(s), ${state.expenses.length} dépense(s).</p>
+    ${encFields()}
+    <p class="err" data-err="x"></p>`,
+  '<button type="submit" class="btn btn-primary">Créer la sauvegarde</button>', (d, form) => {
+    bindEnc(d, form);
+    form.addEventListener('submit', async () => {
+      const err = $('[data-err=x]', d);
+      err.textContent = '';
+      const btn = $('button[type=submit]', d);
+      let pw;
+      try { pw = readEnc(form); } catch (e) { err.textContent = e.message; return; }
+      btn.disabled = true;
+      try {
+        if (await exportData(pw)) closeSheet();
+      } catch (e) { err.textContent = `Impossible de créer la sauvegarde (${e?.name || 'erreur'}).`; }
+      btn.disabled = false;
+    });
+  });
+}
+async function exportData(pw) {
   const payload = {
     app: 'repetiteur', version: 2, exportedAt: new Date().toISOString(), teacher: state.teacher,
     students: state.students, sessions: state.sessions, payments: state.payments,
     assessments: state.assessments, expenses: state.expenses,
   };
-  const name = `repetiteur-sauvegarde-${today()}.json`;
-  const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
+  let blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
+  if (pw) blob = await encryptBlob(blob, pw, 'data');
+  const name = `repetiteur-sauvegarde${pw ? '-protegee' : ''}-${today()}.json`;
   const file = new File([blob], name, { type: 'application/json' });
   let shared = false;
   if (navigator.canShare?.({ files: [file] })) {
-    try { await navigator.share({ files: [file], title: 'Sauvegarde Répétiteur' }); shared = true; } catch (e) { if (e.name === 'AbortError') return; }
+    try { await navigator.share({ files: [file], title: 'Sauvegarde Répétiteur' }); shared = true; } catch (e) { if (e.name === 'AbortError') return false; }
   }
   if (!shared) {
     const a = document.createElement('a');
@@ -2379,14 +2486,130 @@ async function exportData() {
   }
   await DB.setMeta('lastBackup', Date.now());
   await load(); render();
-  toast('Sauvegarde créée. Copie-la hors du téléphone.');
+  toast(`Sauvegarde${pw ? ' protégée' : ''} créée. Copie-la hors du téléphone.`);
+  return true;
+}
+/* Sauvegarde séparée des explications enregistrées (audio) : fichier à part, pour garder la sauvegarde normale légère. */
+const AUDIO_WARN = 60e6;
+const buf2b64 = (buf) => new Promise((res, rej) => {
+  const fr = new FileReader();
+  fr.onload = () => res(String(fr.result).split(',')[1] || '');
+  fr.onerror = () => rej(fr.error);
+  fr.readAsDataURL(new Blob([buf]));
+});
+const b642buf = (s) => { const bin = atob(s); const u = new Uint8Array(bin.length); for (let i = 0; i < bin.length; i++) u[i] = bin.charCodeAt(i); return u.buffer; };
+function openAudioExport() {
+  const n = state.recordings.length;
+  if (!n) { toast("Aucune explication enregistrée à sauvegarder."); return; }
+  const size = state.recordings.reduce((t, r) => t + (r.size || 0), 0);
+  openSheet('Sauvegarder les explications', `
+    <p><b>${n}</b> explication(s), environ <b>${esc(fmtSize(size))}</b>. Le fichier sera environ un tiers plus gros.</p>
+    ${size > AUDIO_WARN ? '<p class="err">C\'est volumineux : la création peut échouer sur un téléphone avec peu de mémoire. Dans ce cas, partage les explications une par une depuis la fiche de l\'élève.</p>' : ''}
+    <p class="text-sm text-muted">Pour restaurer sur un nouveau téléphone : restaure d'abord la sauvegarde normale (les élèves), puis ce fichier.</p>
+    ${encFields()}
+    <p class="err" data-err="x"></p>`,
+  '<button type="submit" class="btn btn-primary">Créer le fichier</button>', (d, form) => {
+    bindEnc(d, form);
+    form.addEventListener('submit', async () => {
+      const btn = $('button[type=submit]', d);
+      const err = $('[data-err=x]', d);
+      err.textContent = '';
+      let pw;
+      try { pw = readEnc(form); } catch (e) { err.textContent = e.message; return; }
+      btn.disabled = true; btn.textContent = 'Création en cours…';
+      try {
+        const parts = [`{"app":"repetiteur-audio","version":1,"exportedAt":${JSON.stringify(new Date().toISOString())},"items":[`];
+        let first = true;
+        for (const rec of state.recordings) {
+          const a = await DB.get('audio', rec.id);
+          if (!a) continue;
+          parts.push(`${first ? '' : ','}${JSON.stringify({ rec, type: a.type || rec.type, data: await buf2b64(a.buf) })}`);
+          first = false;
+        }
+        parts.push(']}');
+        const name = `repetiteur-explications${pw ? '-protegees' : ''}-${today()}.json`;
+        let blob = new Blob(parts, { type: 'application/json' });
+        if (pw) blob = await encryptBlob(blob, pw, 'audio');
+        const file = new File([blob], name, { type: 'application/json' });
+        let shared = false;
+        if (navigator.canShare?.({ files: [file] })) {
+          try { await navigator.share({ files: [file], title: 'Explications Répétiteur' }); shared = true; } catch (e) { if (e.name === 'AbortError') { btn.disabled = false; btn.textContent = 'Créer le fichier'; return; } }
+        }
+        if (!shared) {
+          const a = document.createElement('a');
+          a.href = URL.createObjectURL(blob); a.download = name; a.click();
+          setTimeout(() => URL.revokeObjectURL(a.href), 10000);
+        }
+        await DB.setMeta('lastAudioBackup', Date.now());
+        closeSheet(); await load(); render();
+        toast(`Sauvegarde des explications${pw ? ' protégée' : ''} créée. Copie-la hors du téléphone.`);
+      } catch (e) {
+        btn.disabled = false; btn.textContent = 'Créer le fichier';
+        err.textContent = `Impossible de créer le fichier (${e?.name || 'erreur'}). Partage les explications une par une depuis la fiche de l'élève.`;
+      }
+    });
+  });
+}
+async function importAudios(e) {
+  const file = e.target.files[0];
+  e.target.value = '';
+  if (!file) return;
+  let items;
+  try {
+    const text = await readBackupText(file, 'audio');
+    if (text === null) return;
+    const j = JSON.parse(text);
+    if (j?.app !== 'repetiteur-audio' || !Array.isArray(j.items)) throw new Error('format');
+    const ids = new Set(state.students.map((s) => s.id));
+    items = j.items.map((it) => {
+      const r = it?.rec;
+      if (!r || typeof r.id !== 'string' || typeof r.studentId !== 'string' || typeof it.data !== 'string') return null;
+      const type = /^audio\/[a-z0-9.+-]+$/i.test(String(it.type || r.type)) ? String(it.type || r.type) : 'audio/webm';
+      return { rec: {
+        id: r.id, studentId: r.studentId, sessionId: typeof r.sessionId === 'string' ? r.sessionId : '',
+        date: isDate(r.date) ? r.date : today(), title: String(r.title || 'Explication').slice(0, 200), type,
+        size: 0, duration: Number.isFinite(r.duration) ? r.duration : 0, createdAt: Number.isFinite(r.createdAt) ? r.createdAt : Date.now(),
+      }, data: it.data, type, known: ids.has(r.studentId) };
+    }).filter(Boolean);
+  } catch { closeSheet(); toast("Ce fichier n'est pas une sauvegarde d'explications Répétiteur. Rien n'a été modifié."); return; }
+  const have = new Set(state.recordings.map((x) => x.id));
+  const todo = items.filter((x) => x.known && !have.has(x.rec.id));
+  const absent = items.filter((x) => !x.known).length;
+  const already = items.filter((x) => x.known && have.has(x.rec.id)).length;
+  openSheet('Restaurer les explications ?', `
+    <p>Le fichier contient <b>${items.length}</b> explication(s). <b>${todo.length}</b> seront ajoutée(s).</p>
+    ${already ? `<p class="text-sm text-muted">${already} déjà présente(s) sur ce téléphone, conservée(s) telles quelles.</p>` : ''}
+    ${absent ? `<p class="err">${absent} ignorée(s) : leur élève n'existe pas sur ce téléphone. Restaure d'abord la sauvegarde normale.</p>` : ''}
+    <p class="err" data-err="x"></p>`,
+  `<button type="button" class="btn" data-close>Annuler</button>${todo.length ? '<button type="submit" class="btn btn-primary">Restaurer</button>' : ''}`, (d, form) => {
+    form.addEventListener('submit', async () => {
+      let n = 0;
+      try {
+        for (const x of todo) {
+          const buf = b642buf(x.data);
+          const rec = { ...x.rec, size: buf.byteLength };
+          await DB.batch((o) => { o('recordings').put(rec); o('audio').put({ id: rec.id, buf, type: x.type }); });
+          n++;
+        }
+        closeSheet(); await load(); render();
+        toast(`${n} explication(s) restaurée(s).`);
+      } catch (err) {
+        $('[data-err=x]', d).textContent = `Restauration interrompue après ${n} explication(s) (${err?.name || 'erreur'}). Vérifie l'espace libre du téléphone.`;
+        await load(); render();
+      }
+    });
+  });
 }
 async function importFile(e) {
   const file = e.target.files[0];
   e.target.value = '';
   if (!file) return;
   let r;
-  try { r = parseBackup(await file.text()); } catch { toast("Ce fichier n'est pas une sauvegarde Répétiteur. Rien n'a été modifié."); return; }
+  try {
+    const text = await readBackupText(file, 'data');
+    if (text === null) return;
+    r = parseBackup(text);
+  } catch { closeSheet(); toast("Ce fichier n'est pas une sauvegarde Répétiteur. Rien n'a été modifié."); return; }
   openSheet('Remplacer les données ?', `<p>Le fichier contient <b>${r.students.length}</b> élève(s), <b>${r.sessions.length}</b> séance(s) pointée(s), <b>${r.payments.length}</b> versement(s), <b>${r.assessments.length}</b> évaluation(s) et <b>${r.expenses.length}</b> dépense(s).${r.rejected ? ` ${r.rejected} ligne(s) illisible(s) seront ignorées.` : ''}</p>
     <p>Les données actuelles du téléphone (${state.students.length} élève(s), ${state.payments.length} versement(s)) seront <b>remplacées</b>. Les explications enregistrées des élèves présents dans le fichier sont conservées.</p>`,
   '<button type="button" class="btn" data-close>Annuler</button><button type="submit" class="btn btn-primary">Remplacer</button>', (d, form) => {
@@ -2499,7 +2722,9 @@ const ACTIONS = {
   'rec-new': (d) => openRecorder(d.student, d.session, d.date),
   'rec-share': (d) => shareRecording(d.id),
   'rec-del': (d) => deleteRecording(d.id),
-  export: exportData,
+  export: openDataExport,
+  'audio-export': openAudioExport,
+  'backup-snooze': () => { try { localStorage.setItem('repetiteur-snooze', String(Date.now() + 864e5)); } catch { /* facultatif */ } render(); },
   erase: openErase,
 };
 document.addEventListener('click', (e) => {
