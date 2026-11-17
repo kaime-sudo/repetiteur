@@ -3822,26 +3822,23 @@ function drawQr(doc, text, x, y, size) {
   doc.setFillColor(0, 0, 0);
   for (let r = 0; r < n; r++) for (let c = 0; c < n; c++) if (qr.isDark(r, c)) doc.rect(x + c * cell, y + r * cell, cell + 0.02, cell + 0.02, 'F');
 }
-function receiptQrText(p) {
-  const s = student(p.studentId);
-  return [
-    `RECU ${receiptNo(p)}`, `Date: ${p.date}`, `Eleve: ${s.name}`, `Mois: ${p.month}`,
-    `Montant: ${p.amount} FCFA`, `Mode: ${p.mode}`, state.teacher ? `Repetiteur: ${state.teacher}` : '',
-  ].filter(Boolean).join('\n');
-}
+/* Le QR ne contient que le numéro du reçu (aucune donnée personnelle) : les détails se retrouvent dans l'application. */
+const receiptQrText = (p) => receiptNo(p);
 /* ===== Vérification d'un reçu en scannant son QR code (option A : comparaison avec les paiements de CE téléphone) ===== */
 function parseReceiptQr(text) {
   const lines = String(text).split(/\r?\n/);
-  const m = /^RECU (R-\d{8}-[0-9A-Z]{4})$/.exec((lines[0] || '').trim());
+  const m = /^(?:RECU )?(R-\d{8}-[0-9A-Z]{4})$/.exec((lines[0] || '').trim());
   if (!m) return null;
   const f = {};
   lines.slice(1).forEach((l) => { const i = l.indexOf(':'); if (i > 0) f[l.slice(0, i).trim()] = l.slice(i + 1).trim().slice(0, 80); });
-  return { no: m[1], date: f.Date || '', student: f.Eleve || '', month: f.Mois || '', amount: Number((f.Montant || '').replace(/\D/g, '')), mode: f.Mode || '' };
+  const full = !!(f.Date && f.Eleve && f.Mois && f.Montant && f.Mode);
+  return { no: m[1], full, date: f.Date || '', student: f.Eleve || '', month: f.Mois || '', amount: Number((f.Montant || '').replace(/\D/g, '')), mode: f.Mode || '' };
 }
 const normTxt = (x) => String(x || '').normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase().replace(/\s+/g, ' ').trim();
 function verifyReceipt(q) {
   const cands = state.payments.filter((p) => receiptNo(p) === q.no);
   if (!cands.length) return { status: 'unknown' };
+  if (!q.full) return { status: 'found', p: cands[0] };
   const results = cands.map((p) => {
     const s = student(p.studentId);
     const diffs = [];
@@ -3869,7 +3866,10 @@ function showVerifyResult(text) {
       <p class="card text-sm break-words">${esc(String(text).slice(0, 120))}</p>`;
   } else {
     const v = verifyReceipt(q);
-    if (v.status === 'ok') {
+    if (v.status === 'found') {
+      body = `<p class="text-xl font-bold text-paid">Reçu trouvé</p>
+        <p>Ce numéro correspond à un paiement enregistré dans ton application. <b>Compare les informations ci-dessous avec celles du reçu présenté</b> (élève, mois, montant).</p>${recap(v.p)}`;
+    } else if (v.status === 'ok') {
       body = `<p class="text-xl font-bold text-paid">Reçu conforme</p>
         <p>Ce reçu correspond exactement à un paiement enregistré dans ton application.</p>${recap(v.p)}`;
     } else if (v.status === 'mismatch') {
@@ -3982,11 +3982,7 @@ function receiptPdf(p) {
     const t = pdfSafe(`Total réglé pour ce mois : ${money(st.paid)} sur ${money(st.due)}. ${st.left ? `Reste dû : ${money(st.left)}.` : 'Mois soldé.'}`);
     doc.text(doc.splitTextToSize(t, W - 2 * M), M, y);
   }
-  if (window.qrcode) {
-    drawQr(doc, receiptQrText(p), M, 152, 34);
-    doc.setFont('helvetica', 'normal'); doc.setFontSize(8); doc.setTextColor(110, 110, 110);
-    doc.text(doc.splitTextToSize(pdfSafe('Code lisible avec l\'appareil photo du téléphone : il contient le numéro du reçu, la date, l\'élève, le mois et le montant.'), W - 2 * M - 42), M + 40, 164);
-  }
+  if (window.qrcode) drawQr(doc, receiptQrText(p), (W - 34) / 2, 152, 34);
   doc.setFontSize(9); doc.setTextColor(130, 130, 130);
   doc.text('Merci de votre confiance.', W / 2, 200, { align: 'center' });
   return doc.output('blob');
@@ -5394,7 +5390,7 @@ document.addEventListener('visibilitychange', () => {
   if (lockCfg() && hiddenAt && Date.now() - hiddenAt > 60000 && !$('#alarm').open) showLock();
 });
 
-/* Glisser le doigt : changer d'onglet (ou de jour/semaine dans le Planning). Ignoré près des bords (geste « retour » d'Android), dans les fenêtres ouvertes, les champs et les zones qui défilent à l'horizontale. */
+/* Glisser le doigt : changer d'onglet. Ignoré près des bords (geste « retour » d'Android), dans les fenêtres ouvertes, les champs et les zones qui défilent à l'horizontale. */
 (() => {
   let sx = 0, sy = 0, t0 = 0, armed = false;
   const blocked = (el) => {
@@ -5417,7 +5413,6 @@ document.addEventListener('visibilitychange', () => {
     const dx = t.clientX - sx, dy = t.clientY - sy;
     if (Date.now() - t0 > 800 || Math.abs(dx) < 70 || Math.abs(dx) < 2 * Math.abs(dy)) return;
     const dir = dx < 0 ? 1 : -1;
-    if (state.view === 'planning') { ACTIONS['plan-nav']({ dir: String(dir) }); return; }
     const tabs = $$('.tabs [data-tab]').map((x) => x.dataset.tab);
     const i = tabs.indexOf(state.view) + dir;
     if (i >= 0 && i < tabs.length) location.hash = `#${tabs[i]}`;
